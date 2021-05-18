@@ -1,0 +1,13 @@
+<component name="ArtifactManager">
+  <artifact name="simple-DB:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/simple_DB_jar</output-path>
+    <root id="root">
+      <element id="archive" name="simple-DB.jar">
+        <element id="module-output" name="simple-DB" />
+      </element>
+      <element id="library" level="module" name="JUnit4" module-name="simple-DB" />
+      <element id="library" level="project" name="jline-0.9.94" />
+      <element id="library" level="project" name="zql" />
+    </root>
+  </artifact>
+</component>
