@@ -1,6 +1,7 @@
 package simpledb;
 
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 
 /**
  * Inserts tuples read from the child operator into the tableId specified in the
@@ -49,7 +50,8 @@ public class Insert extends Operator {
     }
 
     public void rewind() throws DbException, TransactionAbortedException {
-        child.rewind();//未open()应报错
+        child.rewind();
+        onceOnly = false;
     }
 
     /**

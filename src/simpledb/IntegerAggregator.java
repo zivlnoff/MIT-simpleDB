@@ -1,6 +1,6 @@
 package simpledb;
 
-import java.util.HashMap;
+import java.util.*;
 
 /**
  * Knows how to compute some aggregate over a set of IntFields.
@@ -50,7 +50,13 @@ public class IntegerAggregator implements Aggregator {
         if (tup.getTupleDesc().getFieldType(afield) == Type.INT_TYPE) {
             typeArray[1] = Type.INT_TYPE;
             Tuple tuple = new Tuple(new TupleDesc(typeArray));
-            Field k = tup.getField(gbfield);
+            Field k = null;
+            if (gbfield != -1) {
+                k = tup.getField(gbfield);
+            } else {
+                k = new IntField(0);
+            }
+            assert (k != null);
             tuple.setField(0, k);
             if (group.containsKey(k)) {
                 count.replace(k, count.get(k) + 1);
@@ -60,10 +66,11 @@ public class IntegerAggregator implements Aggregator {
                     tuple.setField(1, new IntField(Integer.sum(oldValue.getValue(), newValue.getValue())));
                     group.replace(k, tuple);
                 }
-                if (what.toString() == "avg") {
-                    tuple.setField(1, new IntField(Integer.sum(oldValue.getValue() * count.get(k) - 1, newValue.getValue()) / count.get(k)));
-                    group.replace(k, tuple);
-                }
+//                if (what.toString() == "avg") {
+                // oldValue.getValue() * count.get(k) - 1 一开始少了括号，怎么过的simpleDB test 啊 操； 还是Integr
+//                    tuple.setField(1, new IntField(Integer.sum(oldValue.getValue() * (count.get(k) - 1), newValue.getValue()) / count.get(k)));
+//                    group.replace(k, tuple);
+//                }
                 if (what.toString() == "min") {
                     tuple.setField(1, new IntField(Integer.min(oldValue.getValue(), newValue.getValue())));
                     group.replace(k, tuple);
@@ -91,7 +98,34 @@ public class IntegerAggregator implements Aggregator {
      * the constructor.
      */
     public OpIterator iterator() {
+        if (what.toString() == "avg") {
+            Collection<Tuple> values = group.values();
+            Iterator<Tuple> iterator = values.iterator();
+            LinkedList<Tuple> avgAns = new LinkedList<>();
+            Tuple addTuple = null;
+            while (iterator.hasNext()) {
+                Tuple next = iterator.next();
+                addTuple = new Tuple(next.getTupleDesc());
+                addTuple.setField(0, next.getField(0));
+                addTuple.setField(1, new IntField(((IntField) next.getField(1)).getValue() / count.get(next.getField(0))));
+                avgAns.add(addTuple);
+            }
+            assert(addTuple != null);
+            return new TupleIterator(addTuple.getTupleDesc(), avgAns);
+        }
+        if (what.toString() == "count") {
+            ArrayList<Tuple> list = new ArrayList<>(count.size());
+            Iterator<Map.Entry<Field, Integer>> fields = count.entrySet().iterator();
+            while (fields.hasNext()) {
+                Map.Entry<Field, Integer> next = fields.next();
+                Tuple tuple = new Tuple(new TupleDesc(typeArray));
+                tuple.setField(0, next.getKey());
+                tuple.setField(1, new IntField(next.getValue()));
+                list.add(tuple);
+            }
+            return new TupleIterator(new TupleDesc(typeArray), list);
+        }
+        //noGrouping 在Aggregate.java里 解耦合了
         return new TupleIterator(new TupleDesc(typeArray), group.values());
     }
-
 }

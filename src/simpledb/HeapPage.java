@@ -102,9 +102,8 @@ public class HeapPage implements Page {
     }
 
     public void setBeforeImage() {
-        synchronized (oldDataLock) {
-            oldData = getPageData().clone();
-        }
+        oldData = getPageData().clone();
+        dTid = null;
     }
 
     /**
@@ -252,7 +251,7 @@ public class HeapPage implements Page {
             }
         }
         if (!exist) {
-//            throw new DbException("No find tuple");
+            throw new DbException("No find tuple");
         }
     }
 
@@ -287,29 +286,22 @@ public class HeapPage implements Page {
      * Marks this page as dirty/not dirty and record that transaction
      * that did the dirtying
      */
-    private boolean dirty;
-    //咋就整了个栈呢。笑死
-    private LinkedList<TransactionId> transactions = new LinkedList<>();
+    TransactionId dTid;
 
     public void markDirty(boolean dirty, TransactionId tid) {
-        this.dirty = dirty;
-        if (dirty) {
-            transactions.push(tid);
-        } else {
-            transactions.clear();
+        if(dirty) {
+            this.dTid = tid;
         }
-
+        else {
+            this.dTid = null;
+        }
     }
 
     /**
      * Returns the tid of the transaction that last dirtied this page, or null if the page is not dirty
      */
     public TransactionId isDirty() {
-        return transactions.peek();
-    }
-
-    public boolean getDirty() {
-        return dirty;
+        return dTid;
     }
 
     /**

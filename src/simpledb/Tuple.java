@@ -14,7 +14,7 @@ import java.util.Objects;
 public class Tuple implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private TupleDesc td = null;
+    private TupleDesc td;
     private ArrayList<Field> t;
 
     /**
@@ -85,9 +85,9 @@ public class Tuple implements Serializable {
     public String toString() {
         StringBuilder stringBuilder = new StringBuilder();
         for (int i = 0; i < td.numFields(); i++) {
-            if (t.get(i).getClass() == IntField.class)
+            if (t.get(i)!=null&&t.get(i).getClass() == IntField.class)
                 stringBuilder.append(((IntField) t.get(i)).getValue()).append(" ");
-            if (t.get(i).getClass() == StringField.class) {
+            if (t.get(i)!=null&&t.get(i).getClass() == StringField.class) {
                 stringBuilder.append(((StringField) t.get(i)).getValue()).append(" ");
             }
         }

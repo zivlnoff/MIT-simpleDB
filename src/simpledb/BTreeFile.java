@@ -193,13 +193,14 @@ public class BTreeFile implements DbFile {
                                        Field f)
             throws DbException, TransactionAbortedException {
         if (pid.pgcateg() == BTreePageId.ROOT_PTR) {
-            Page page = Database.getBufferPool().getPage(tid, pid, Permissions.READ_ONLY);
+            Page page = getPage(tid, dirtypages, pid, Permissions.READ_ONLY);
             BTreePageId rootId = ((BTreeRootPtrPage) page).getRootId();
             return findLeafPage(tid, dirtypages, rootId, perm, f);
         }
         if (pid.pgcateg() == BTreePageId.INTERNAL) {
-            Page page = Database.getBufferPool().getPage(tid, pid, Permissions.READ_ONLY);
+            Page page = getPage(tid, dirtypages, pid, Permissions.READ_ONLY);
             Iterator<BTreeEntry> iterator = ((BTreeInternalPage) page).iterator();
+            //变量声明在循环外/降低空间复杂度/最后一行代码会用到
             BTreeEntry next = null;
             while (iterator.hasNext()) {
                 next = iterator.next();
@@ -207,7 +208,7 @@ public class BTreeFile implements DbFile {
                     return findLeafPage(tid, dirtypages, next.getLeftChild(), perm, f);
                 }
                 if (f.compare(Op.EQUALS, next.getKey())) {
-                    Page leftPage = Database.getBufferPool().getPage(tid, next.getLeftChild(), perm);
+                    Page leftPage = getPage(tid, dirtypages,next.getLeftChild(), perm);
                     if (((BTreePage) leftPage).getId().pgcateg() == BTreePageId.LEAF) {
                         Iterator<Tuple> tupleIterator = ((BTreeLeafPage) leftPage).reverseIterator();
                         if (tupleIterator.hasNext()) {
@@ -219,7 +220,18 @@ public class BTreeFile implements DbFile {
                             }
                         }
                     } else {
-                        return findLeafPage(tid, dirtypages, next.getRightChild(), perm, f);
+                        BTreeLeafPage leftPossible = findLeafPage(tid, dirtypages, next.getLeftChild(), perm, f);
+                        BTreeLeafPage rightPossible = findLeafPage(tid, dirtypages, next.getRightChild(), perm, f);
+                        Iterator<Tuple> tupleIterator = leftPossible.reverseIterator();
+                        if (tupleIterator.hasNext()) {
+                            Tuple checkLastEqual = tupleIterator.next();
+                            if (f.equals(checkLastEqual.getField(keyField))) {
+                                return leftPossible;
+                            } else {
+                                //有必要检测右叶子页吗？
+                                return rightPossible;
+                            }
+                        }
                     }
                 }
             }

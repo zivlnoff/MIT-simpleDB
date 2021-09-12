@@ -2,10 +2,11 @@ package simpledb;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * BufferPool manages the reading and writing of pages into memory from
@@ -34,20 +35,26 @@ public class BufferPool {
     public static final int DEFAULT_PAGES = 50;
 
     private final int numPages;
-    private volatile ConcurrentHashMap<PageId, Page> bufferPool;
-    private volatile LinkedList<PageId> pageIdCache = new LinkedList<>();
-    private volatile ConcurrentHashMap<PageId, ReentrantReadWriteLock> lock;
-    private volatile ConcurrentHashMap<TransactionId, TransactionsLock> transaction;
+    private ConcurrentHashMap<PageId, Page> bufferPool;
+    private LinkedList<PageId> pageIdCache;
+    private ConcurrentHashMap<PageId, PageLock> pageId2pageLock;
+    private ConcurrentHashMap<TransactionId, TransactionLock> transactionId2hasLock;
 
-    private static class TransactionsLock {
+    private static class PageLock {
+        public final Semaphore fifoRw = new Semaphore(1);
+        public final Semaphore rw = new Semaphore(1);
+        public final Semaphore mutex = new Semaphore(1);
+        public volatile int readCount = 0;
+
+    }
+
+    private static class TransactionLock {
         TransactionId tid;
-        ConcurrentHashMap<PageId, ReentrantReadWriteLock> lock;
-        ConcurrentHashMap<ReentrantReadWriteLock, Permissions> permission;
+        LinkedList<PageId> pageIdLinkedList = new LinkedList<>();
+        ConcurrentHashMap<PageLock, Permissions> hasLock = new ConcurrentHashMap<>();
 
-        public TransactionsLock(TransactionId tid) {
+        public TransactionLock(TransactionId tid) {
             this.tid = tid;
-            lock = new ConcurrentHashMap<>();
-            permission = new ConcurrentHashMap<>();
         }
     }
 
@@ -59,8 +66,9 @@ public class BufferPool {
     public BufferPool(int numPages) {
         this.numPages = numPages;
         bufferPool = new ConcurrentHashMap<>(numPages);
-        lock = new ConcurrentHashMap<>(numPages);
-        transaction = new ConcurrentHashMap<>();
+        pageIdCache = new LinkedList<>();
+        pageId2pageLock = new ConcurrentHashMap<>();
+        transactionId2hasLock = new ConcurrentHashMap<>();
     }
 
     public static int getPageSize() {
@@ -94,31 +102,32 @@ public class BufferPool {
      */
     public Page getPage(TransactionId tid, PageId pid, Permissions perm)
             throws TransactionAbortedException, DbException {
-        //如果事务正在access这个page则根据情况修改perm并返回page
-        if (transaction.containsKey(tid) && transaction.get(tid).lock.containsKey(pid)) {
-            TransactionsLock transactionsLock = transaction.get(tid);
-            ReentrantReadWriteLock reentrantReadWriteLock = transactionsLock.lock.get(pid);
-            Permissions permissions = transactionsLock.permission.get(reentrantReadWriteLock);
-            if (permissions == Permissions.READ_ONLY && perm == Permissions.READ_WRITE) {
-                ReentrantReadWriteLock newReentrantReadWriteLock = new ReentrantReadWriteLock();
-                newReentrantReadWriteLock.writeLock().lock();//可能有其他读者
-                lock.put(pid, newReentrantReadWriteLock);
-//                reentrantReadWriteLock.readLock().unlock();//违反了两段锁协议,不是当前线程的
-                //原来的读锁被抛弃了，还没有解锁
-                transactionsLock.lock.put(pid, newReentrantReadWriteLock);
-                transactionsLock.permission.remove(reentrantReadWriteLock);
-                transactionsLock.permission.put(newReentrantReadWriteLock, Permissions.READ_WRITE);
+        //页->页锁
+        pageId2pageLock.putIfAbsent(pid, new PageLock());
+        PageLock pageLock = pageId2pageLock.get(pid);
+        //事务->事务锁集合
+        transactionId2hasLock.putIfAbsent(tid, new TransactionLock(tid));
+        TransactionLock transactionLock = transactionId2hasLock.get(tid);
+        //按需🔒住,先不管中断异常
+        if (perm == Permissions.READ_ONLY) {
+            if (!transactionLock.hasLock.containsKey(pageLock)) {
+                lockInShareMode(transactionLock, pid, pageLock);
             }
-            if (bufferPool.containsKey(pid)) {
-                return bufferPool.get(pid);
-            } else {
+        } else {
+            lockForUpdate(tid, transactionLock, pid, pageLock);
+        }
+        //获得页面
+        if (bufferPool.containsKey(pid)) {
+            return bufferPool.get(pid);
+        } else {
+            synchronized (Database.getBufferPool()) {
                 if (bufferPool.size() < numPages) {
                     Page page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
                     bufferPool.put(pid, page);
                     pageIdCache.offer(pid);
                     return page;
                 } else {
-                    //evict一个clean页,且不在某个事务执行中
+                    //discard一个clean页,且不在某个事务执行中(好像可以释放事务执行中的clean页)
                     for (int i = 0; i < pageIdCache.size(); i++) {
                         if (bufferPool.get(pageIdCache.get(i)).isDirty() == null) {
                             PageId poll = pageIdCache.get(i);
@@ -130,54 +139,69 @@ public class BufferPool {
                 }
             }
         }
-        //tid还没接触到此pid，根据读写锁判断能否访问，重入锁计数
-        {
-            //说明这个页要有🔒了
-            synchronized (BufferPool.class) {
-                if (!lock.containsKey(pid)) {
-                    lock.put(pid, new ReentrantReadWriteLock());
+    }
+
+    private void lockInShareMode(TransactionLock transactionLock, PageId pid, PageLock pageLock) throws TransactionAbortedException {
+        try {
+            pageLock.fifoRw.acquire();
+            pageLock.mutex.acquire();
+            if (pageLock.readCount == 0) {
+                if (!pageLock.rw.tryAcquire(120, TimeUnit.MILLISECONDS)) {
+                    throw new TransactionAbortedException();
                 }
             }
-            //按需🔒住
-            if (perm == Permissions.READ_ONLY) {
-                lock.get(pid).readLock().lock();
-            } else {
-                lock.get(pid).writeLock().lock();
-            }
-            //事务关联->锁
-            TransactionsLock transactionsLock = null;
-            synchronized (BufferPool.class) {
-                if (!transaction.containsKey(tid)) {
-                    transactionsLock = new TransactionsLock(tid);
-                    transaction.put(tid, transactionsLock);
-                } else {
-                    transactionsLock = transaction.get(tid);
-                }
-            }
-            assert (transactionsLock != null);
-            transactionsLock.lock.put(pid, lock.get(pid));
-            transactionsLock.permission.put(lock.get(pid), perm);
+            transactionLock.hasLock.put(pageLock, Permissions.READ_ONLY);
+            transactionLock.pageIdLinkedList.add(pid);
+            pageLock.readCount++;
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            pageLock.mutex.release();
+            pageLock.fifoRw.release();
         }
-        //去获得页面
-        if (bufferPool.containsKey(pid)) {
-            return bufferPool.get(pid);
-        } else {
-            if (bufferPool.size() < numPages) {
-                Page page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
-                bufferPool.put(pid, page);
-                pageIdCache.offer(pid);
-                return page;
-            } else {
-                //evict一个clean页,且不在某个事务执行中
-                for (int i = 0; i < pageIdCache.size(); i++) {
-                    if (bufferPool.get(pageIdCache.get(i)).isDirty() == null) {
-                        PageId poll = pageIdCache.get(i);
-                        discardPage(poll);
-                        return getPage(tid, pid, perm);
+    }
+
+    private void lockForUpdate(TransactionId tid, TransactionLock transactionLock, PageId pid, PageLock pageLock) throws TransactionAbortedException {
+        try {
+            pageLock.fifoRw.acquire();
+            if (transactionLock.hasLock.containsKey(pageLock)) {
+                if (transactionLock.hasLock.get(pageLock) != Permissions.READ_WRITE) {
+                    //读锁升级写锁
+                    pageLock.mutex.acquire();
+                    if (--pageLock.readCount == 0) {
+                        pageLock.rw.release();
                     }
+                    pageLock.mutex.release();
+                    if (!pageLock.rw.tryAcquire(120, TimeUnit.MILLISECONDS)) {
+                        pageLock.mutex.acquire();
+                        pageLock.readCount++;
+                        pageLock.mutex.release();
+                        //1
+                        try {
+                            transactionComplete(tid, false);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                        throw new TransactionAbortedException();
+                    }
+                    transactionLock.hasLock.put(pageLock, Permissions.READ_WRITE);
                 }
-                throw new DbException("All bufferPool pages are dirty!");
             }
+            if (!transactionLock.hasLock.containsKey(pageLock)) {
+                if (!pageLock.rw.tryAcquire(120, TimeUnit.MILLISECONDS)) {
+                    throw new TransactionAbortedException();
+                    //2
+                }
+                transactionLock.hasLock.put(pageLock, Permissions.READ_WRITE);
+            }
+            if (!transactionLock.pageIdLinkedList.contains(pid)) {
+                transactionLock.pageIdLinkedList.add(pid);
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            //放这里是因为1、2处都要做这个操作，为了统一
+            pageLock.fifoRw.release();
         }
     }
 
@@ -191,15 +215,24 @@ public class BufferPool {
      * @param pid the ID of the page to unlock
      */
     public void releasePage(TransactionId tid, PageId pid) {
-        TransactionsLock transactionsLock = transaction.get(tid);
-        ReentrantReadWriteLock reentrantReadWriteLock = transactionsLock.lock.get(pid);
-        if (transactionsLock.permission.get(reentrantReadWriteLock) == Permissions.READ_ONLY) {
-            transactionsLock.lock.get(pid).readLock().unlock();
+        TransactionLock transactionLock = transactionId2hasLock.get(tid);
+        PageLock pageLock = pageId2pageLock.get(pid);
+        Permissions permissions = transactionLock.hasLock.get(pageLock);
+        if (permissions == Permissions.READ_ONLY) {
+            try {
+                pageLock.mutex.acquire();
+                if (--pageLock.readCount == 0) {
+                    pageLock.rw.release();
+                }
+                pageLock.mutex.release();
+                transactionLock.hasLock.remove(pageLock);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
         } else {
-            transactionsLock.lock.get(pid).writeLock().unlock();
+            transactionLock.hasLock.remove(pageLock);
+            pageLock.rw.release();
         }
-        transactionsLock.permission.remove(reentrantReadWriteLock);
-        transactionsLock.lock.remove(pid);
     }
 
     /**
@@ -212,13 +245,6 @@ public class BufferPool {
     }
 
     /**
-     * Return true if the specified transaction has a lock on the specified page
-     */
-    public boolean holdsLock(TransactionId tid, PageId p) {
-        return transaction.get(tid).lock.containsKey(p);
-    }
-
-    /**
      * Commit or abort a given transaction; release all locks associated to
      * the transaction.
      *
@@ -227,39 +253,44 @@ public class BufferPool {
      */
     public void transactionComplete(TransactionId tid, boolean commit)
             throws IOException {
-        if (transaction.containsKey(tid)) {
-            if (commit == true) {
-                flushPages(tid);
-                TransactionsLock transactionsLock = transaction.get(tid);
-                Iterator<ReentrantReadWriteLock> iterator = transactionsLock.lock.values().iterator();
-                while (iterator.hasNext()) {
-                    ReentrantReadWriteLock next = iterator.next();
-                    if (transactionsLock.permission.get(next) == Permissions.READ_ONLY) {
-                        if (next.getReadHoldCount() != 0) {
-                            next.readLock().unlock();
-                        }
-
-                    } else {
-                        if (next.getWriteHoldCount() != 0) {
-                            next.writeLock().unlock();
+        if (transactionId2hasLock.containsKey(tid)) {
+            TransactionLock transactionLock = transactionId2hasLock.get(tid);
+            if (commit) {
+                for (Map.Entry<PageLock, Permissions> next : transactionLock.hasLock.entrySet()) {
+                    PageLock pageLock = next.getKey();
+                    if (next.getValue() == Permissions.READ_ONLY) {
+                        try {
+                            pageLock.mutex.acquire();
+                            if (--pageLock.readCount == 0) {
+                                pageLock.rw.release();
+                            }
+                            pageLock.mutex.release();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
                         }
                     }
+                    if (next.getValue() == Permissions.READ_WRITE) {
+                        for (PageId nextPageId : transactionLock.pageIdLinkedList) {
+                            flushPage(nextPageId);
+                        }
+                        pageLock.rw.release();
+                    }
                 }
-                transaction.remove(tid);
-            }
-            if (commit == false) {
-                TransactionsLock transactionsLock = transaction.get(tid);
-                Iterator<PageId> iterator = transactionsLock.lock.keySet().iterator();
-                while (iterator.hasNext()) {
-                    PageId next = iterator.next();
-                    if (bufferPool.containsKey(next)) {
+                transactionId2hasLock.remove(tid);
+            } else {
+                for (PageId next : transactionLock.pageIdLinkedList) {
+                    Page page = bufferPool.get(next);
+                    if (page != null) {
                         bufferPool.put(next, bufferPool.get(next).getBeforeImage());
                     }
+                    //这样写会有线程安全问题
+//                    if (bufferPool.containsKey(next)) {
+//                        bufferPool.put(next, bufferPool.get(next).getBeforeImage());
+//                    }
                 }
-                transactionComplete(tid, true);
             }
+            transactionComplete(tid, true);
         }
-
     }
 
     /**
@@ -306,22 +337,6 @@ public class BufferPool {
         }
     }
 
-
-    /**
-     * Flush all dirty pages to disk.
-     * NB: Be careful using this routine -- it writes dirty data to disk so will
-     * break simpledb if running in NO STEAL mode.
-     */
-    public synchronized void flushAllPages() throws IOException {
-        Iterator<PageId> iterator = bufferPool.keySet().iterator();
-        while (iterator.hasNext()) {
-            PageId next = iterator.next();
-            if ((bufferPool.get(next)).isDirty() != null) {
-                flushPage(next);
-            }
-        }
-    }
-
     /**
      * Remove the specific page id from the buffer pool.
      * Needed by the recovery manager to ensure that the
@@ -331,9 +346,11 @@ public class BufferPool {
      * Also used by B+ tree files to ensure that deleted pages
      * are removed from the cache so they can be reused safely
      */
-    public synchronized void discardPage(PageId pid) {
-        bufferPool.remove(pid);
-        pageIdCache.remove(pid);
+    public void discardPage(PageId pid) {
+        synchronized (Database.getBufferPool()) {
+            bufferPool.remove(pid);
+            pageIdCache.remove(pid);
+        }
     }
 
     /**
@@ -343,31 +360,40 @@ public class BufferPool {
      */
     private synchronized void flushPage(PageId pid) throws IOException {
         Page page = bufferPool.get(pid);
-        Database.getCatalog().getDatabaseFile(pid.getTableId()).writePage(page);
+        //page != null 判断很关键
+        if (page != null && page.isDirty() != null) {
+            Database.getCatalog().getDatabaseFile(pid.getTableId()).writePage(page);
+            //page.markDirty(false, null);
+            //因为要discard了，就没必要markClean了
+            discardPage(pid);
+        }
     }
+
+    /**
+     * Flush all dirty pages to disk.
+     * NB: Be careful using this routine -- it writes dirty data to disk so will
+     * break simpledb if running in NO STEAL mode.
+     */
+    //Test for
+    public synchronized void flushAllPages() throws IOException {
+        for (PageId next : bufferPool.keySet())
+            if ((bufferPool.get(next)).isDirty() != null) {
+                flushPage(next);
+            }
+    }
+
 
     /**
      * Write all pages of the specified transaction to disk.
      */
+    //Test for
     public synchronized void flushPages(TransactionId tid) throws IOException {
-        if (transaction.containsKey(tid)) {
-            TransactionsLock transactionsLock = transaction.get(tid);
-            Iterator<PageId> iterator = transactionsLock.lock.keySet().iterator();
-            while (iterator.hasNext()) {
-                PageId next = iterator.next();
+        if (transactionId2hasLock.containsKey(tid)) {
+            TransactionLock transactionsLock = transactionId2hasLock.get(tid);
+            for (PageId next : transactionsLock.pageIdLinkedList)
                 if (bufferPool.containsKey(next) && bufferPool.get(next).isDirty() != null) {
                     flushPage(next);
                 }
-            }
         }
-        //什么时候markDirty clean？
-    }
-
-    /**
-     * Discards a page from the buffer pool.
-     * Flushes the page to disk to ensure dirty pages are updated on disk.
-     */
-    private synchronized void evictPage() throws DbException {
-        //丢弃一个page？
     }
 }

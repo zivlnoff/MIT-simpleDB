@@ -43,7 +43,7 @@ public class TupleDesc implements Serializable {
      * that are included in this TupleDesc
      */
     public Iterator<TDItem> iterator() {
-        return null;
+        return tdArray.iterator();
     }
 
     private static final long serialVersionUID = 1L;
@@ -93,7 +93,7 @@ public class TupleDesc implements Serializable {
      * @throws NoSuchElementException if i is not a valid field reference.
      */
     public String getFieldName(int i) throws NoSuchElementException {
-        if (i > tdArray.size()) {
+        if (i >= tdArray.size()) {
             throw new NoSuchElementException();
         }
         return tdArray.get(i).fieldName;
@@ -108,7 +108,7 @@ public class TupleDesc implements Serializable {
      * @throws NoSuchElementException if i is not a valid field reference.
      */
     public Type getFieldType(int i) throws NoSuchElementException {
-        if (i > tdArray.size()) {
+        if (i >= tdArray.size()) {
             throw new NoSuchElementException();
         }
         return tdArray.get(i).fieldType;
@@ -122,11 +122,16 @@ public class TupleDesc implements Serializable {
      * @throws NoSuchElementException if no field with a matching name is found.
      */
     public int fieldNameToIndex(String name) throws NoSuchElementException {
-        for (int i = 0; i < tdArray.size(); i++) {
-            String field = tdArray.get(i).fieldName;
-            if (field != null && tdArray.get(i).fieldName.equals(name)) {
+        if(name == null){
+            throw new InputMismatchException("Please input valid field name.");
+        }
+        int i = 0;
+        for (TDItem tdItem : tdArray) {
+            String field = tdItem.fieldName;
+            if (name.equals(field)) {
                 return i;
             }
+            i++;
         }
         throw new NoSuchElementException();
     }
@@ -193,7 +198,11 @@ public class TupleDesc implements Serializable {
     public int hashCode() {
         // If you want to use TupleDesc as keys for HashMap, implement this so
         // that equal objects have equals hashCode() results
-        throw new UnsupportedOperationException("unimplemented");
+
+//        throw new UnsupportedOperationException("unimplemented");
+
+        //TransactionTest needed
+        return tdArray.hashCode();
     }
 
     /**

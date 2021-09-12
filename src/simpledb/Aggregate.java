@@ -40,11 +40,20 @@ public class Aggregate extends Operator {
         this.afield = afield;
         this.gfield = gfield;
         this.aop = aop;
-        if (child.getTupleDesc().getFieldType(afield) == Type.INT_TYPE) {
-            aggregator = new IntegerAggregator(gfield, child.getTupleDesc().getFieldType(gfield), afield, aop);
-        }
-        if (child.getTupleDesc().getFieldType(afield) == Type.STRING_TYPE) {
-            aggregator = new StringAggregator(gfield, child.getTupleDesc().getFieldType(gfield), afield, aop);
+        if (gfield != -1) {
+            if (child.getTupleDesc().getFieldType(afield) == Type.INT_TYPE) {
+                aggregator = new IntegerAggregator(gfield, child.getTupleDesc().getFieldType(gfield), afield, aop);
+            }
+            if (child.getTupleDesc().getFieldType(afield) == Type.STRING_TYPE) {
+                aggregator = new StringAggregator(gfield, child.getTupleDesc().getFieldType(gfield), afield, aop);
+            }
+        } else {
+            if (child.getTupleDesc().getFieldType(afield) == Type.INT_TYPE) {
+                aggregator = new IntegerAggregator(gfield, Type.INT_TYPE, afield, aop);
+            }
+            if (child.getTupleDesc().getFieldType(afield) == Type.STRING_TYPE) {
+                aggregator = new StringAggregator(gfield, Type.INT_TYPE, afield, aop);
+            }
         }
     }
 
@@ -97,7 +106,7 @@ public class Aggregate extends Operator {
         super.open();
         child.open();
         try {
-            while (true)
+            while (child.hasNext())
                 aggregator.mergeTupleIntoGroup(child.next());
         } catch (NoSuchElementException e) {
             // explicitly ignored
@@ -125,8 +134,7 @@ public class Aggregate extends Operator {
             tuple.setField(0, next.getField(0));
             tuple.setField(1, next.getField(1));
             return tuple;
-        }
-        else {
+        } else {
             return null;
         }
     }
@@ -155,8 +163,8 @@ public class Aggregate extends Operator {
         Type[] types = new Type[2];
         types[0] = child.getTupleDesc().getFieldType(gfield);
         types[1] = switch (aop.toString()) {
-            case "avg","count","sum" -> Type.INT_TYPE;
-            case "max","min" -> child.getTupleDesc().getFieldType(afield);
+            case "avg", "count", "sum" -> Type.INT_TYPE;
+            case "max", "min" -> child.getTupleDesc().getFieldType(afield);
             default -> throw new RuntimeException("状态不正确");
         };
         return new TupleDesc(types, new String[]{child.getTupleDesc().getFieldName(gfield), aop.toString() + "(" + child.getTupleDesc().getFieldName(afield) + ")"});

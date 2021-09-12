@@ -63,6 +63,7 @@ public class TransactionTest extends SimpleDbTestBase {
         TransactionId tid = new TransactionId();
         DbFileIterator it = table.iterator(tid);
         it.open();
+        it.hasNext();
         Tuple tup = it.next();
         assertEquals(threads, ((IntField) tup.getField(0)).getValue());
         it.close();
@@ -96,9 +97,13 @@ public class TransactionTest extends SimpleDbTestBase {
                         // read the value out of the table
                         Query q1 = new Query(ss1, tr.getId());
                         q1.start();
+                        //每个自己都加了hasNext();
+                        q1.hasNext();
                         Tuple tup = q1.next();
                         IntField intf = (IntField) tup.getField(0);
                         int i = intf.getValue();
+
+                        System.out.println(i);
 
                         // create a Tuple so that Insert can insert this new value
                         // into the table.
@@ -117,6 +122,7 @@ public class TransactionTest extends SimpleDbTestBase {
                         Query q2 = new Query(delOp, tr.getId());
 
                         q2.start();
+                        q2.hasNext();
                         q2.next();
                         q2.close();
 
@@ -129,24 +135,25 @@ public class TransactionTest extends SimpleDbTestBase {
                         Insert insOp = new Insert(tr.getId(), ti, tableId);
                         Query q3 = new Query(insOp, tr.getId());
                         q3.start();
+                        q3.hasNext();
                         q3.next();
                         q3.close();
 
                         tr.commit();
                         break;
                     } catch (TransactionAbortedException te) {
-                        //System.out.println("thread " + tr.getId() + " killed");
+                        System.out.println("thread " + tr.getId() + " killed");
                         // give someone else a chance: abort the transaction
                         tr.transactionComplete(true);
                         latch.stillParticipating();
                     }
                 }
-                //System.out.println("thread " + id + " done");
+//                System.out.println("thread " + id + " done");
             } catch (Exception e) {
                 // Store exception for the master thread to handle
                 exception = e;
             }
-            
+
             try {
                 latch.notParticipating();
             } catch (InterruptedException e) {
@@ -157,22 +164,22 @@ public class TransactionTest extends SimpleDbTestBase {
             completed = true;
         }
     }
-    
+
     private static class ModifiableCyclicBarrier {
         private CountDownLatch awaitLatch;
         private CyclicBarrier participationLatch;
         private AtomicInteger nextParticipants;
-        
+
         public ModifiableCyclicBarrier(int parties) {
             reset(parties);
         }
-        
+
         private void reset(int parties) {
             nextParticipants = new AtomicInteger(0);
             awaitLatch = new CountDownLatch(parties);
             participationLatch = new CyclicBarrier(parties, new UpdateLatch(this, nextParticipants));
         }
-        
+
         public void await() throws InterruptedException, BrokenBarrierException {
             awaitLatch.countDown();
             awaitLatch.await();
@@ -190,7 +197,7 @@ public class TransactionTest extends SimpleDbTestBase {
         private static class UpdateLatch implements Runnable {
             ModifiableCyclicBarrier latch;
             AtomicInteger nextParticipants;
-            
+
             public UpdateLatch(ModifiableCyclicBarrier latch, AtomicInteger nextParticipants) {
                 this.latch = latch;
                 this.nextParticipants = nextParticipants;
@@ -202,10 +209,10 @@ public class TransactionTest extends SimpleDbTestBase {
                 if (participants > 0) {
                     latch.reset(participants);
                 }
-            }           
+            }
         }
     }
-    
+
     @Test public void testSingleThread()
             throws IOException, DbException, TransactionAbortedException {
         validateTransactions(1);
@@ -220,7 +227,7 @@ public class TransactionTest extends SimpleDbTestBase {
             throws IOException, DbException, TransactionAbortedException {
         validateTransactions(5);
     }
-    
+
     @Test public void testTenThreads()
     throws IOException, DbException, TransactionAbortedException {
         validateTransactions(10);
